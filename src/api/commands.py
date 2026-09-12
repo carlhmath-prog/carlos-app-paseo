@@ -1,5 +1,6 @@
 
 import click
+from werkzeug.security import generate_password_hash
 from api.models import db, User, Service, Zone, PetType
 
 """
@@ -33,6 +34,31 @@ def setup_commands(app):
     @app.cli.command("insert-test-data")
     def insert_test_data():
         pass
+
+    @app.cli.command("create-admin")
+    @click.option("--email", prompt="Correo del administrador")
+    @click.option("--password", prompt="Contraseña", hide_input=True,
+                  confirmation_prompt=True)
+    def create_admin(email, password):
+        """Crea o promueve una cuenta de administrador."""
+        email = email.strip().lower()
+        user = User.query.filter_by(email=email).first()
+        if user:
+            user.role = "admin"
+            user.is_active = True
+            user.password = generate_password_hash(password)
+            message = f"Administrador actualizado: {email}"
+        else:
+            user = User(
+                email=email,
+                password=generate_password_hash(password),
+                role="admin",
+                is_active=True,
+            )
+            db.session.add(user)
+            message = f"Administrador creado: {email}"
+        db.session.commit()
+        click.echo(message)
 
     @app.cli.command("insert-catalog-data")
     def insert_catalog_data():

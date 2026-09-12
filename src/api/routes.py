@@ -3,6 +3,8 @@ This module takes care of starting the API Server, Loading the DB and Adding the
 """
 from datetime import date, time
 from flask import request, jsonify, Blueprint
+from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
+from werkzeug.security import generate_password_hash, check_password_hash
 from api.models import (
     db, User, Service, Zone, PetType, WalkerProfile, WalkerAvailability,
     Reservation, walker_services, walker_zones, walker_pet_types,
@@ -29,9 +31,30 @@ def handle_hello():
 VALID_ROLES = {"cliente", "paseador", "admin"}
 
 
+def get_current_user(require_auth=True):
+    identity = get_jwt_identity()
+    if identity is None:
+        if require_auth:
+            raise APIException("Usuario no autorizado", 401)
+        return None
+
+    user_id = int(identity)
+    user = User.query.get(user_id)
+    if not user or not user.is_active:
+        raise APIException("Usuario no autorizado", 401)
+    return user
+
+
 @api.route('/users', methods=['POST', 'GET'])
+@jwt_required(optional=True)
 def handle_users():
     if request.method == 'GET':
+        current_user = get_current_user(require_auth=True)
+
+        if current_user.role != 'admin':
+            raise APIException(
+                "Solo los administradores pueden ver usuarios", 403)
+
         role = request.args.get('role')
         if role and role not in VALID_ROLES:
             raise APIException("Invalid role", 400)
@@ -42,12 +65,21 @@ def handle_users():
     email = data.get('email', '').strip().lower()
     password = data.get('password')
     role = data.get('role', 'cliente')
+    current_user = get_current_user(require_auth=False)
     if not email or not password or role not in VALID_ROLES:
         raise APIException(
             "email, password and a valid role are required", 400)
+    if role == 'admin' and (not current_user or current_user.role != 'admin'):
+        raise APIException(
+            "Solo un administrador puede crear cuentas de administrador", 403)
     if User.query.filter_by(email=email).first():
         raise APIException("Email already registered", 409)
-    user = User(email=email, password=password, role=role, is_active=True)
+    user = User(
+        email=email,
+        password=generate_password_hash(password),
+        role=role,
+        is_active=True,
+    )
     db.session.add(user)
     db.session.commit()
     return jsonify(user.serialize()), 201
@@ -59,13 +91,51 @@ def login():
     email = data.get('email', '').strip().lower()
     password = data.get('password')
     user = User.query.filter_by(email=email, is_active=True).first()
-    if not user or user.password != password:
+    if not user:
         raise APIException("Correo o contraseña incorrectos", 401)
+
+    try:
+        password_valid = user.password == password or check_password_hash(
+            user.password, password)
+    except ValueError:
+        password_valid = user.password == password
+
+    if not password_valid:
+        raise APIException("Correo o contraseña incorrectos", 401)
+
+    token = create_access_token(identity=str(user.id))
+    return jsonify({"token": token, "user": user.serialize()}), 200
+
+
+@api.route('/me', methods=['GET'])
+@jwt_required()
+def me():
+    user_id = int(get_jwt_identity())
+    user = User.query.get(user_id)
+    if not user or not user.is_active:
+        raise APIException("Usuario no autorizado", 401)
     return jsonify({"user": user.serialize()}), 200
 
 
 def _catalog_response(model):
     return jsonify([item.serialize() for item in model.query.filter_by(is_active=True).all()]), 200
+
+
+def _reservation_payload(reservation):
+    client = User.query.get(reservation.client_id)
+    walker = WalkerProfile.query.get(reservation.walker_id)
+    walker_user = User.query.get(walker.user_id) if walker else None
+    service = Service.query.get(reservation.service_id)
+    payload = reservation.serialize()
+    payload.update({
+        "client": client.serialize() if client else None,
+        "walker": {
+            **walker.serialize(),
+            "email": walker_user.email if walker_user else None,
+        } if walker else None,
+        "service": service.serialize() if service else None,
+    })
+    return payload
 
 
 @api.route('/services', methods=['GET'])
@@ -84,6 +154,7 @@ def list_pet_types():
 
 
 @api.route('/walkers', methods=['POST', 'GET'])
+@jwt_required(optional=True)
 def handle_walkers():
     if request.method == 'GET':
         profiles = WalkerProfile.query.all()
@@ -119,10 +190,20 @@ def handle_walkers():
             result.append(item)
         return jsonify(result), 200
 
+    current_user = get_current_user(require_auth=True)
+
+    if current_user.role != 'paseador':
+        raise APIException(
+            "Solo los paseadores pueden crear o actualizar su perfil", 403)
+
     data = request.get_json(silent=True) or {}
     required = ('user_id', 'full_name')
     if any(not data.get(field) for field in required):
         raise APIException("user_id and full_name are required", 400)
+
+    if int(data['user_id']) != current_user.id:
+        raise APIException("No puedes editar el perfil de otro usuario", 403)
+
     user = User.query.get(data['user_id'])
     if not user or user.role != 'paseador':
         raise APIException("The user must have the paseador role", 400)
@@ -146,9 +227,19 @@ def handle_walkers():
 
 
 @api.route('/walkers/<int:walker_id>/availability', methods=['POST'])
+@jwt_required()
 def create_walker_availability(walker_id):
-    if not WalkerProfile.query.get(walker_id):
+    current_user = get_current_user()
+    if current_user.role != 'paseador':
+        raise APIException(
+            "Solo los paseadores pueden gestionar disponibilidad", 403)
+
+    profile = WalkerProfile.query.get(walker_id)
+    if not profile:
         raise APIException("Walker profile not found", 404)
+    if profile.user_id != current_user.id:
+        raise APIException(
+            "No puedes modificar la disponibilidad de otro paseador", 403)
     data = request.get_json(silent=True) or {}
     try:
         day = int(data['day_of_week'])
@@ -172,9 +263,19 @@ def create_walker_availability(walker_id):
 
 
 @api.route('/walkers/<int:walker_id>/settings', methods=['POST'])
+@jwt_required()
 def configure_walker(walker_id):
-    if not WalkerProfile.query.get(walker_id):
+    current_user = get_current_user()
+    if current_user.role != 'paseador':
+        raise APIException(
+            "Solo los paseadores pueden configurar servicios", 403)
+
+    profile = WalkerProfile.query.get(walker_id)
+    if not profile:
         raise APIException("Walker profile not found", 404)
+    if profile.user_id != current_user.id:
+        raise APIException(
+            "No puedes configurar el perfil de otro paseador", 403)
     data = request.get_json(silent=True) or {}
     selected_services = data.get('services', [])
     selected_zones = data.get('zone_ids', [])
@@ -227,18 +328,42 @@ def configure_walker(walker_id):
 
 
 @api.route('/reservations', methods=['POST', 'GET'])
+@jwt_required()
 def handle_reservations():
+    current_user = get_current_user()
+
     if request.method == 'GET':
         client_id = request.args.get('client_id', type=int)
-        query = Reservation.query.filter_by(
-            client_id=client_id) if client_id else Reservation.query
-        return jsonify([reservation.serialize() for reservation in query.order_by(Reservation.reservation_date).all()]), 200
+        if current_user.role == 'cliente':
+            if client_id is not None and client_id != current_user.id:
+                raise APIException(
+                    "No puedes ver reservas de otro usuario", 403)
+            query = Reservation.query.filter_by(client_id=current_user.id)
+        elif current_user.role == 'paseador':
+            profile = WalkerProfile.query.filter_by(
+                user_id=current_user.id).first()
+            query = Reservation.query.filter_by(
+                walker_id=profile.id) if profile else Reservation.query.filter_by(walker_id=-1)
+        else:
+            query = Reservation.query.filter_by(
+                client_id=client_id) if client_id is not None else Reservation.query
+
+        if client_id is not None and current_user.role not in ('cliente', 'admin'):
+            raise APIException("No puedes ver reservas de otro usuario", 403)
+        reservations = query.order_by(
+            Reservation.reservation_date, Reservation.reservation_time).all()
+        return jsonify([_reservation_payload(reservation) for reservation in reservations]), 200
 
     data = request.get_json(silent=True) or {}
     required = ('client_id', 'walker_id', 'service_id',
                 'reservation_date', 'reservation_time')
     if any(field not in data for field in required):
         raise APIException("All reservation fields are required", 400)
+    if current_user.role not in ('cliente', 'admin'):
+        raise APIException("Solo los clientes pueden crear reservas", 403)
+    if current_user.role != 'admin' and int(data['client_id']) != current_user.id:
+        raise APIException(
+            "No puedes crear una reserva para otro cliente", 403)
     client = User.query.get(data['client_id'])
     walker = WalkerProfile.query.get(data['walker_id'])
     service = Service.query.get(data['service_id'])
@@ -270,4 +395,4 @@ def handle_reservations():
     )
     db.session.add(reservation)
     db.session.commit()
-    return jsonify(reservation.serialize()), 201
+    return jsonify(_reservation_payload(reservation)), 201

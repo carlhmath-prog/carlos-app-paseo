@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import useGlobalReducer from "../../hooks/useGlobalReducer";
 import "./index1.css";
 
 const walkerImages = [
@@ -10,6 +11,8 @@ const walkerImages = [
 
 export const Reserva = () => {
     const navigate = useNavigate();
+    const { store, dispatch } = useGlobalReducer();
+    const token = store.auth?.token ?? localStorage.getItem("paseafeliz_token");
     const [walkers, setWalkers] = useState([]);
     const [services, setServices] = useState([]);
     const [selected, setSelected] = useState(0);
@@ -19,11 +22,19 @@ export const Reserva = () => {
     useEffect(() => {
         const loadOptions = async () => {
             try {
-                const [walkersResponse, servicesResponse] = await Promise.all([fetch("/api/walkers"), fetch("/api/services")]);
+                const [walkersResponse, servicesResponse] = await Promise.all([
+                    fetch("/api/walkers", token ? { headers: { Authorization: `Bearer ${token}` } } : undefined),
+                    fetch("/api/services", token ? { headers: { Authorization: `Bearer ${token}` } } : undefined),
+                ]);
+
                 if (!walkersResponse.ok || !servicesResponse.ok) throw new Error("No se pudieron cargar las opciones");
                 const [walkersData, servicesData] = await Promise.all([walkersResponse.json(), servicesResponse.json()]);
+
                 setWalkers(walkersData);
                 setServices(servicesData);
+                dispatch({ type: "set_walkers", payload: walkersData });
+                dispatch({ type: "set_services", payload: servicesData });
+
                 if (servicesData.length) setForm((current) => ({ ...current, service_id: String(servicesData[0].id) }));
                 setStatus({ loading: false, error: "", success: "" });
             } catch (error) {
@@ -31,7 +42,7 @@ export const Reserva = () => {
             }
         };
         loadOptions();
-    }, []);
+    }, [dispatch, token]);
 
     useEffect(() => {
         const availableServices = walkers[selected]?.services || services;
@@ -58,7 +69,10 @@ export const Reserva = () => {
         try {
             const response = await fetch("/api/reservations", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
                 body: JSON.stringify({ ...form, client_id: user.id, walker_id: walkers[selected].id }),
             });
             const data = await response.json();

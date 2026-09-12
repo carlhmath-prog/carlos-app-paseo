@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import useGlobalReducer from "../../hooks/useGlobalReducer";
 import "./index1.css";
 
 export const Login = () => {
     const navigate = useNavigate();
+    const { dispatch } = useGlobalReducer();
     const [form, setForm] = useState({ email: "", password: "" });
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -20,7 +22,10 @@ export const Login = () => {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || "No se pudo iniciar sesión");
+
+            localStorage.setItem("paseafeliz_token", data.token);
             localStorage.setItem("paseafeliz_user", JSON.stringify(data.user));
+            dispatch({ type: "login_success", payload: { user: data.user, token: data.token } });
             navigate("/panel");
         } catch (requestError) {
             setError(requestError instanceof TypeError

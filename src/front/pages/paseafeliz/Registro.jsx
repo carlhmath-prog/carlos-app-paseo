@@ -23,11 +23,6 @@ export const Registro = () => {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || "No se pudo crear la cuenta");
-            if (form.role === "paseador") {
-                localStorage.setItem("paseafeliz_user", JSON.stringify(data));
-                navigate("/perfil-paseador");
-                return;
-            }
             setStatus({ loading: false, error: "", success: "Cuenta creada correctamente. Ya puedes iniciar sesión." });
             setForm({ email: "", password: "", role: "cliente" });
         } catch (error) {

@@ -2,11 +2,15 @@
 This module takes care of starting the API Server, Loading the DB and Adding the endpoints
 """
 import os
+from datetime import timedelta
 from flask import Flask, request, jsonify, url_for, send_from_directory
+from dotenv import load_dotenv
+from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
 from flask_swagger import swagger
+from werkzeug.security import check_password_hash
 from api.utils import APIException, generate_sitemap
-from api.models import db
+from api.models import db, User
 from api.routes import api
 from api.admin import setup_admin
 from api.commands import setup_commands
@@ -14,6 +18,7 @@ from api.commands import setup_commands
 # from models import Person
 
 ENV = "development" if os.getenv("FLASK_DEBUG") == "1" else "production"
+load_dotenv()
 static_file_dir = os.path.join(os.path.dirname(
     os.path.realpath(__file__)), '../dist/')
 app = Flask(__name__)
@@ -28,11 +33,37 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:////tmp/test.db"
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = os.getenv(
+    'JWT_SECRET_KEY', 'super-secret-paseafeliz-key')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 MIGRATE = Migrate(app, db, compare_type=True)
+jwt = JWTManager(app)
 db.init_app(app)
 
-# add the admin
 setup_admin(app)
+
+
+@app.before_request
+def protect_admin_panel():
+    if not request.path == '/admin' and not request.path.startswith('/admin/'):
+        return None
+
+    credentials = request.authorization
+    user = User.query.filter_by(
+        email=credentials.username.lower() if credentials else '',
+        role='admin',
+        is_active=True,
+    ).first()
+    password_valid = user and check_password_hash(
+        user.password, credentials.password)
+    if not password_valid:
+        response = jsonify(
+            {"message": "Autenticación de administrador requerida"})
+        response.status_code = 401
+        response.headers['WWW-Authenticate'] = 'Basic realm="PaseaFeliz Admin"'
+        return response
+    return None
+
 
 # add the admin
 setup_commands(app)
@@ -56,7 +87,10 @@ def sitemap():
         return generate_sitemap(app)
     return send_from_directory(static_file_dir, 'index.html')
 
+
 # any other endpoint will try to serve it like a static file
+
+
 @app.route('/<path:path>', methods=['GET'])
 def serve_any_other_file(path):
     if not os.path.isfile(os.path.join(static_file_dir, path)):
